@@ -19,6 +19,9 @@ async def lifespan(app: FastAPI):
     
     # Initialize PostgreSQL Tables
     async with engine.begin() as conn:
+        # Enable PostGIS extension for geometry/geography types
+        from sqlalchemy import text
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
         # Note: In production use Alembic. We create tables here for rapid runnable testing.
         await conn.run_sync(Base.metadata.create_all)
         

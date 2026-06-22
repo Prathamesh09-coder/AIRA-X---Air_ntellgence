@@ -1,13 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { PageShell } from "@/components/layout/PageShell";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { KpiCard } from "@/components/aira/KpiCard";
 import { Network, Search, ArrowRight, Activity, HelpCircle, GitCommit } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { searchKnowledgeGraph, getRootCause, getImpactAnalysis } from "@/lib/api";
+import { searchKnowledgeGraph, getRootCause, getImpactAnalysis, WS_URL } from "@/lib/api";
 
 export const Route = createFileRoute("/knowledge-graph")({
   head: () => ({
@@ -29,6 +29,14 @@ function KnowledgeGraphPage() {
   // Selected node for downstream/upstream analysis
   const [analysisNode, setAnalysisNode] = useState<{ name: string; type: "impact" | "root-cause" } | null>(null);
 
+  // Live graph traversals received via WebSocket
+  const [liveTraversals, setLiveTraversals] = useState<Array<{
+    path: string;
+    queryType: string;
+    latency: number;
+    timestamp: string;
+  }>>([]);
+
   // 1. Search nodes in Neo4j
   const { data: nodes = [], isLoading: isSearching } = useQuery({
     queryKey: ["kg-search", activeSearch, selectedLabel],
@@ -48,6 +56,41 @@ function KnowledgeGraphPage() {
     queryFn: () => getImpactAnalysis(analysisNode!.name),
     enabled: !!analysisNode && analysisNode.type === "impact",
   });
+
+  // Real-time WebSocket connection to receive dynamic graph traversals
+  useEffect(() => {
+    const ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      console.log("[WS Connected] Knowledge Graph Explorer listening to real-time events...");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "realtime_update" && payload.graph_update) {
+          const upd = payload.graph_update;
+          setLiveTraversals((prev) => [
+            {
+              path: upd.traversed_path,
+              queryType: upd.query_type,
+              latency: upd.latency_ms,
+              timestamp: new Date().toLocaleTimeString(),
+            },
+            ...prev.slice(0, 3) // keep the last 4 elements
+          ]);
+        }
+      } catch (err) {
+        console.error("Error parsing WS packet in knowledge graph:", err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.warn("[WS Graph Error] Fallback active.", err);
+    };
+
+    return () => ws.close();
+  }, [WS_URL]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,11 +199,38 @@ function KnowledgeGraphPage() {
 
           <div className="flex-1 mt-4 flex flex-col justify-center min-h-[300px]">
             {!analysisNode ? (
-              <div className="text-center p-6 border border-dashed border-border rounded-md bg-muted/40">
-                <HelpCircle className="h-8 w-8 mx-auto text-muted-foreground opacity-50" />
-                <p className="mt-2 text-xs font-semibold text-muted-foreground">No Traversal Triggered</p>
-                <p className="mt-1 text-[10px] text-muted-foreground leading-normal max-w-[200px] mx-auto">
-                  Click 'Root Cause' or 'Downstream Impact' on any node to trace relationships.
+              <div className="space-y-3">
+                <div className="flex items-center justify-between border-b border-border pb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Live Agent Graph Walks</span>
+                  <Badge variant="secondary" className="text-[8px] h-4 leading-none animate-pulse bg-primary/10 text-primary border border-primary/20">
+                    Graph Walk Stream Active
+                  </Badge>
+                </div>
+                {liveTraversals.length === 0 ? (
+                  <div className="text-center p-6 border border-dashed border-border rounded-md bg-muted/40 my-4">
+                    <HelpCircle className="h-8 w-8 mx-auto text-muted-foreground opacity-50" />
+                    <p className="mt-2 text-xs font-semibold text-muted-foreground">Waiting for graph walks...</p>
+                    <p className="mt-1 text-[10px] text-muted-foreground leading-normal max-w-[200px] mx-auto">
+                      Background compliance agents trigger graph queries in Neo4j every few seconds.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-h-[310px] overflow-y-auto pr-1">
+                    {liveTraversals.map((t, idx) => (
+                      <div key={idx} className="p-2.5 rounded border border-border bg-background/50 hover:border-primary/20 transition-all text-[11px]">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="font-semibold text-primary">{t.queryType}</span>
+                          <span className="text-[9px] text-muted-foreground">{t.timestamp} · {t.latency}ms</span>
+                        </div>
+                        <div className="font-mono text-[9px] leading-relaxed text-foreground bg-muted/30 p-1.5 rounded border border-border/50 break-words">
+                          {t.path}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[9px] text-muted-foreground text-center italic mt-2.5">
+                  Tip: Click 'Root Cause' or 'Downstream Impact' on any node to query entities.
                 </p>
               </div>
             ) : (

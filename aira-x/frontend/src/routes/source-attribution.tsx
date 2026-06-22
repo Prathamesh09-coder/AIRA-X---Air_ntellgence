@@ -3,13 +3,13 @@ import { PageShell } from "@/components/layout/PageShell";
 import { CityMap } from "@/components/maps/CityMap";
 import { useAppStore } from "@/store/app-store";
 import { generateGrid } from "@/lib/aira-data";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { KpiCard } from "@/components/aira/KpiCard";
 import { ArrowDown, ArrowUp, Minus, Target } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { getSourceAttribution } from "@/lib/api";
+import { getSourceAttribution, WS_URL } from "@/lib/api";
 
 export const Route = createFileRoute("/source-attribution")({
   head: () => ({
@@ -26,6 +26,18 @@ export const Route = createFileRoute("/source-attribution")({
 function SourceAttribution() {
   const city = useAppStore((s) => s.city);
   const [selected, setSelected] = useState(0);
+  const [liveAttributionData, setLiveAttributionData] = useState<{
+    dominantSource: string;
+    trafficPct: number;
+    industrialPct: number;
+    constructionPct: number;
+    cropBurningPct: number;
+    biomassBurningPct: number;
+    wasteBurningPct: number;
+    hotspotLat: number;
+    hotspotLon: number;
+    evidenceLog: string;
+  } | null>(null);
 
   // 1. Fetch live source attribution from backend
   const { data: liveSources = [] } = useQuery({
@@ -33,7 +45,56 @@ function SourceAttribution() {
     queryFn: () => getSourceAttribution(city.center[1], city.center[0]),
   });
 
+  // Real-time WebSocket connection to receive dynamic source apportionment
+  useEffect(() => {
+    const ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      console.log("[WS Connected] Source Attribution Page listening to real-time events...");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "realtime_update" && payload.attribution_update) {
+          const upd = payload.attribution_update;
+          setLiveAttributionData({
+            dominantSource: upd.dominant_source,
+            trafficPct: upd.traffic_pct,
+            industrialPct: upd.industrial_pct,
+            constructionPct: upd.construction_pct,
+            cropBurningPct: upd.crop_burning_pct,
+            biomassBurningPct: upd.biomass_burning_pct,
+            wasteBurningPct: upd.waste_burning_pct,
+            hotspotLat: upd.hotspot_lat,
+            hotspotLon: upd.hotspot_lon,
+            evidenceLog: upd.evidence_log
+          });
+        }
+      } catch (err) {
+        console.error("Error parsing WS packet in attribution:", err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.warn("[WS Attribution Error] Fallback active.", err);
+    };
+
+    return () => ws.close();
+  }, [WS_URL]);
+
   const sources = useMemo(() => {
+    if (liveAttributionData) {
+      return [
+        { source: "Traffic", percent: liveAttributionData.trafficPct, confidence: 0.88, trend: "up" as const, evidence: "Traffic density sensors highlight corridor congestion." },
+        { source: "Industrial emissions", percent: liveAttributionData.industrialPct, confidence: 0.85, trend: "flat" as const, evidence: "High stack monitoring plume telemetry." },
+        { source: "Construction", percent: liveAttributionData.constructionPct, confidence: 0.81, trend: "up" as const, evidence: "Dust sensor threshold warning issued." },
+        { source: "Crop residue burning", percent: liveAttributionData.cropBurningPct, confidence: 0.86, trend: "up" as const, evidence: "MODIS crop fires anomalies detected upwind." },
+        { source: "Biomass burning", percent: liveAttributionData.biomassBurningPct, confidence: 0.72, trend: "down" as const, evidence: "Satellite thermal boundary warnings." },
+        { source: "Waste burning", percent: liveAttributionData.wasteBurningPct, confidence: 0.68, trend: "flat" as const, evidence: "Municipal dump perimeter thermal alerts." },
+      ].sort((a, b) => b.percent - a.percent);
+    }
+
     if (liveSources.length === 0) {
       return [
         { source: "Traffic", percent: 35, confidence: 0.88, trend: "up" as const, evidence: "Elevated road sensor readings" },
@@ -51,7 +112,7 @@ function SourceAttribution() {
       trend: s.contribution_pct > 30 ? ("up" as const) : s.contribution_pct < 10 ? ("down" as const) : ("flat" as const),
       evidence: s.evidence_log,
     }));
-  }, [liveSources]);
+  }, [liveSources, liveAttributionData]);
 
   const cur = sources[selected] || sources[0];
 
@@ -92,7 +153,7 @@ function SourceAttribution() {
       breadcrumbs={[{ label: "Intelligence" }, { label: "Source Attribution" }]}
       actions={
         <Badge variant="outline" className="h-6 gap-1.5 font-normal">
-          <Target className="h-3 w-3" /> Precision 0.89 · Recall 0.84 · F1 0.86
+          <Target className="h-3 w-3 animate-pulse text-primary" /> Precision 0.89 · Recall 0.84 · F1 0.86
         </Badge>
       }
     >
@@ -105,9 +166,16 @@ function SourceAttribution() {
 
       <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-5">
         <div className="rounded-lg bg-card ring-1 ring-border lg:col-span-3">
-          <div className="border-b border-border px-4 py-2.5">
-            <h2 className="text-sm font-semibold">Attribution Map</h2>
-            <p className="text-[11px] text-muted-foreground">Hyperlocal grid visualization driven by spatial source sensors</p>
+          <div className="border-b border-border px-4 py-2.5 flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold">Attribution Map</h2>
+              <p className="text-[11px] text-muted-foreground">Hyperlocal grid visualization driven by spatial source sensors</p>
+            </div>
+            {liveAttributionData && (
+              <Badge variant="outline" className="h-5 text-[9px] border-primary text-primary animate-pulse">
+                Hotspot stream live
+              </Badge>
+            )}
           </div>
           <div className="relative h-[440px]">
             <CityMap city={city} cells={cells} className="absolute inset-0" mode="attribution" />
@@ -163,6 +231,21 @@ function SourceAttribution() {
                     <p className="text-[10px] font-medium leading-tight text-muted-foreground line-clamp-2">{cur.evidence}</p>
                   </div>
                 </div>
+                {liveAttributionData && (
+                  <div className="mt-2.5 pt-2.5 border-t border-border/50 text-[10px]">
+                    <div className="font-semibold text-primary mb-1">Hotspot Geographic Evidence Location:</div>
+                    <div className="flex items-center gap-1.5 font-mono text-[9px] bg-muted/60 p-1.5 rounded border border-border">
+                      <span className="h-1.5 w-1.5 rounded-full bg-destructive animate-ping" />
+                      <span>{liveAttributionData.hotspotLat.toFixed(5)}° N</span>
+                      <span className="text-muted-foreground">|</span>
+                      <span>{liveAttributionData.hotspotLon.toFixed(5)}° E</span>
+                      <span className="ml-auto text-[8px] text-muted-foreground">(Sentinel Live Stream)</span>
+                    </div>
+                    <p className="mt-1.5 text-[9px] text-muted-foreground italic leading-normal">
+                      Telemetry log: {liveAttributionData.evidenceLog}
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -3,7 +3,7 @@ import { PageShell } from "@/components/layout/PageShell";
 import { CityMap } from "@/components/maps/CityMap";
 import { useAppStore } from "@/store/app-store";
 import { generateForecast, generateGrid } from "@/lib/aira-data";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   Area,
   AreaChart,
@@ -22,7 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { KpiCard } from "@/components/aira/KpiCard";
 import { Crosshair, TrendingUp, Brain, Gauge } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { getForecast } from "@/lib/api";
+import { getForecast, WS_URL } from "@/lib/api";
 
 export const Route = createFileRoute("/forecasting")({
   head: () => ({
@@ -43,6 +43,8 @@ function ForecastPage() {
   const city = useAppStore((s) => s.city);
   const [horizon, setHorizon] = useState<(typeof HORIZONS)[number]>("48h");
   const [pollutant, setPollutant] = useState<(typeof POLLUTANTS)[number]>("AQI");
+  const [aqiOffset, setAqiOffset] = useState(0);
+  const [liveStreamAlert, setLiveStreamAlert] = useState<string | null>(null);
 
   const hours = horizon === "24h" ? 24 : horizon === "48h" ? 48 : 72;
 
@@ -51,6 +53,41 @@ function ForecastPage() {
     queryKey: ["forecast", city.id, city.center[1], city.center[0], hours],
     queryFn: () => getForecast(city.center[1], city.center[0], hours),
   });
+
+  // Real-time WebSocket connection to receive GNN micro-variance adjustments
+  useEffect(() => {
+    const ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      console.log("[WS Connected] Forecasting Page listening to real-time events...");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "realtime_update") {
+          if (payload.aqi_delta !== undefined) {
+            setAqiOffset((prev) => {
+              const next = prev + payload.aqi_delta;
+              return Math.max(-30, Math.min(30, next));
+            });
+          }
+          if (payload.twin_update) {
+            setLiveStreamAlert(`GNN Recalculation: ${payload.twin_update.ward} ward changed (AQI ${payload.twin_update.aqi})`);
+            setTimeout(() => setLiveStreamAlert(null), 3500);
+          }
+        }
+      } catch (err) {
+        console.error("Error parsing WS packet in forecaster:", err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.warn("[WS Forecast Error] Fallback active.", err);
+    };
+
+    return () => ws.close();
+  }, [WS_URL]);
 
   const pollutantKey = useMemo(() => {
     switch (pollutant) {
@@ -84,15 +121,18 @@ function ForecastPage() {
       const date = new Date(f.timestamp);
       const label = isNaN(date.getTime()) ? `+${idx+1}h` : `${date.getHours()}:00`;
       
+      // Inject real-time offset to the current timestamp (index 0)
+      const finalVal = idx === 0 ? Math.max(10, val + aqiOffset) : val;
+      
       return {
         timestamp: label,
-        val: Math.round(val * 10) / 10,
-        lower: Math.max(0, Math.round((val - band) * 10) / 10),
-        upper: Math.round((val + band) * 10) / 10,
+        val: Math.round(finalVal * 10) / 10,
+        lower: Math.max(0, Math.round((finalVal - band) * 10) / 10),
+        upper: Math.round((finalVal + band) * 10) / 10,
         hour: idx + 1,
       };
     });
-  }, [liveForecast, pollutantKey, hours]);
+  }, [liveForecast, pollutantKey, hours, aqiOffset]);
 
   const peak = useMemo(() => {
     if (chartData.length === 0) return 0;
@@ -136,13 +176,13 @@ function ForecastPage() {
     const o3Max = pm25Max * 0.35 + 20;
     
     return [
-      { name: "PM2.5", current: Math.round(cur.pm25), peak: Math.round(pm25Max) },
+      { name: "PM2.5", current: Math.round(Math.max(10, cur.pm25 + aqiOffset)), peak: Math.round(pm25Max) },
       { name: "PM10", current: Math.round(cur.pm10), peak: Math.round(pm10Max) },
       { name: "NO₂", current: Math.round(cur.no2), peak: Math.round(no2Max) },
       { name: "SO₂", current: Math.round(cur.so2), peak: Math.round(so2Max) },
       { name: "O₃", current: Math.round(o3Cur), peak: Math.round(o3Max) },
     ];
-  }, [liveForecast]);
+  }, [liveForecast, aqiOffset]);
 
   const drivers = useMemo(() => {
     // Generate feature weights based on coordinates
@@ -164,7 +204,16 @@ function ForecastPage() {
       subtitle={`1km × 1km resolution · PM2.5-GNN ensemble · ${city.name}`}
       breadcrumbs={[{ label: "Intelligence" }, { label: "Forecasting" }]}
       actions={
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap md:flex-nowrap">
+          {liveStreamAlert ? (
+            <Badge variant="outline" className="h-8 gap-1.5 border-primary bg-primary/5 text-primary text-[10px] animate-pulse">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" /> {liveStreamAlert}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="h-8 gap-1.5 text-muted-foreground text-[10px]">
+              <span className="h-1.5 w-1.5 rounded-full bg-success animate-ping" style={{ animationDuration: '3s' }} /> Live GNN Stream Active
+            </Badge>
+          )}
           <div className="flex h-8 items-center rounded-md border border-input bg-card p-0.5">
             {POLLUTANTS.map((p) => (
               <button

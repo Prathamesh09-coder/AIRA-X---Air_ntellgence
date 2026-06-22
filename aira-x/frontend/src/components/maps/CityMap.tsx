@@ -206,5 +206,66 @@ export function CityMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [city.id, mode]);
 
+  // Update data sources dynamically when cells change in real-time
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const updateMapData = () => {
+      if (!map.isStyleLoaded()) return;
+
+      // 1. Update polygon grid source
+      const gridSource = map.getSource("aqi") as maplibregl.GeoJSONSource | undefined;
+      if (gridSource) {
+        const latOffset = 0.0045;
+        const lngOffset = 0.0045 / Math.cos(city.center[1] * Math.PI / 180);
+        const features = cells.map((c) => ({
+          type: "Feature",
+          geometry: {
+            type: "Polygon",
+            coordinates: [[
+              [c.lng - lngOffset, c.lat - latOffset],
+              [c.lng + lngOffset, c.lat - latOffset],
+              [c.lng + lngOffset, c.lat + latOffset],
+              [c.lng - lngOffset, c.lat + latOffset],
+              [c.lng - lngOffset, c.lat - latOffset]
+            ]]
+          },
+          properties: {
+            aqi: c.aqi,
+            pm25: c.pm25,
+            color: mode === "attribution" ? (c as any).sourceColor || "#00E5FF" : aqiToColor(c.aqi),
+            sourceName: (c as any).sourceName || "Traffic",
+            sourcePercent: (c as any).sourcePercent || 35,
+            evidence: (c as any).evidence || "Elevated sensor telemetry logs."
+          }
+        }));
+        gridSource.setData({
+          type: "FeatureCollection",
+          features: features as any,
+        });
+      }
+
+      // 2. Update heatmap point source
+      const pointSource = map.getSource("aqi-points-src") as maplibregl.GeoJSONSource | undefined;
+      if (pointSource) {
+        pointSource.setData({
+          type: "FeatureCollection",
+          features: cells.map((c) => ({
+            type: "Feature",
+            geometry: { type: "Point", coordinates: [c.lng, c.lat] },
+            properties: { aqi: c.aqi },
+          })) as any,
+        });
+      }
+    };
+
+    if (map.loaded()) {
+      updateMapData();
+    } else {
+      map.once("load", updateMapData);
+    }
+  }, [cells, city, mode]);
+
   return <div ref={ref} className={className} />;
 }
